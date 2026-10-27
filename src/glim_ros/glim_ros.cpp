@@ -6,6 +6,7 @@
 #include <thread>
 #include <iostream>
 #include <functional>
+#include <stdexcept>
 #include <boost/format.hpp>
 #include <spdlog/spdlog.h>
 #include <spdlog/sinks/basic_file_sink.h>
@@ -124,6 +125,10 @@ GlimROS::GlimROS(const rclcpp::NodeOptions& options) : Node("glim_ros", options)
   }
 
   // Global mapping
+  std::string resume_dump_path;
+  this->declare_parameter<std::string>("resume_dump_path", "");
+  this->get_parameter<std::string>("resume_dump_path", resume_dump_path);
+  bool resumed_global_mapping = false;
   if (config_ros.param<bool>("glim_ros", "enable_global_mapping", true)) {
     const std::string global_mapping_so_name =
       glim::Config(glim::GlobalConfig::get_config_path("config_global_mapping")).param<std::string>("global_mapping", "so_name", "libglobal_mapping.so");
@@ -131,6 +136,13 @@ GlimROS::GlimROS(const rclcpp::NodeOptions& options) : Node("glim_ros", options)
       spdlog::info("load {}", global_mapping_so_name);
       auto global = GlobalMappingBase::load_module(global_mapping_so_name);
       if (global) {
+        if (!resume_dump_path.empty()) {
+          spdlog::info("resume global map from {}", resume_dump_path);
+          if (!global->load(resume_dump_path)) {
+            throw std::runtime_error("failed to load resume_dump_path: " + resume_dump_path);
+          }
+          resumed_global_mapping = true;
+        }
         global_mapping.reset(new AsyncGlobalMapping(global));
       }
     }
@@ -172,6 +184,10 @@ GlimROS::GlimROS(const rclcpp::NodeOptions& options) : Node("glim_ros", options)
         }
       }
     }
+  }
+
+  if (resumed_global_mapping && global_mapping && !global_mapping->replay_submaps()) {
+    spdlog::warn("restored global map could not be replayed to viewer callbacks");
   }
 
   // ROS-related

@@ -195,12 +195,17 @@ GlimROS::GlimROS(const rclcpp::NodeOptions& options) : Node("glim_ros", options)
   const std::string imu_topic = config_ros.param<std::string>("glim_ros", "imu_topic", "");
   const std::string points_topic = config_ros.param<std::string>("glim_ros", "points_topic", "");
   const std::string image_topic = config_ros.param<std::string>("glim_ros", "image_topic", "");
+  const bool enable_imu = config_ros.param<bool>("glim_ros", "enable_imu", true);
 
   // Subscribers
   rclcpp::SensorDataQoS default_imu_qos;
   default_imu_qos.get_rmw_qos_profile().depth = 1000;
   auto qos = get_qos_settings(config_ros, "glim_ros", "imu_qos", default_imu_qos);
-  imu_sub = this->create_subscription<sensor_msgs::msg::Imu>(imu_topic, qos, std::bind(&GlimROS::imu_callback, this, _1));
+  if (enable_imu) {
+    imu_sub = this->create_subscription<sensor_msgs::msg::Imu>(imu_topic, qos, std::bind(&GlimROS::imu_callback, this, _1));
+  } else {
+    spdlog::info("IMU subscription disabled by glim_ros/enable_imu=false");
+  }
 
   qos = get_qos_settings(config_ros, "glim_ros", "points_qos");
   points_sub = this->create_subscription<sensor_msgs::msg::PointCloud2>(points_topic, qos, std::bind(&GlimROS::points_callback, this, _1));

@@ -8,6 +8,12 @@
 #include <chrono>
 #include <filesystem>
 #include <iostream>
+#include <fstream>
+#include <mutex>
+#include <map>
+#include <sstream>
+#include <iomanip>
+#include <vector>
 #include <spdlog/spdlog.h>
 #include <boost/format.hpp>
 #include <rclcpp/rclcpp.hpp>
@@ -21,6 +27,8 @@
 
 #include <glim/util/config.hpp>
 #include <glim/util/extension_module_ros2.hpp>
+#include <glim/odometry/callbacks.hpp>
+#include <glim/mapping/callbacks.hpp>
 #include <glim_ros/glim_ros.hpp>
 #include <glim_ros/ros_compatibility.hpp>
 
@@ -151,10 +159,55 @@ int main(int argc, char** argv) {
   // List topics
   glim::Config config_ros(glim::GlobalConfig::get_config_path("config_ros"));
 
+  const bool enable_imu = config_ros.param<bool>("glim_ros", "enable_imu", true);
+  // Record independent pipeline stages, including the final queue drain.
+  struct FrameAudit {
+    std::mutex mutex;
+    std::map<std::string, size_t> counts;
+    std::map<std::string, std::pair<double, double>> ranges;
+    std::map<std::string, std::vector<double>> stamps;
+    void add(const std::string& stage, double stamp) {
+      std::lock_guard<std::mutex> lock(mutex);
+      if (counts[stage]++ == 0) ranges[stage].first = stamp;
+      ranges[stage].second = stamp;
+      if (stage != "imu_callback") stamps[stage].push_back(stamp);
+    }
+    std::string json() {
+      std::lock_guard<std::mutex> lock(mutex);
+      std::ostringstream result;
+      result << std::setprecision(17) << "{";
+      bool first = true;
+      for (const auto& [stage, count] : counts) {
+        if (!first) result << ",";
+        first = false;
+        result << "\"" << stage << "\":{\"count\":" << count
+               << ",\"first_s\":" << ranges[stage].first << ",\"last_s\":" << ranges[stage].second;
+        if (stamps.count(stage)) {
+          result << ",\"stamps_s\":[";
+          for (size_t i = 0; i < stamps[stage].size(); ++i) {
+            if (i) result << ',';
+            result << stamps[stage][i];
+          }
+          result << ']';
+        }
+        result << '}';
+      }
+      result << "}";
+      return result.str();
+    }
+  } audit;
+  glim::OdometryEstimationCallbacks::on_insert_frame.add([&audit](const glim::PreprocessedFrame::Ptr& f) { audit.add("odometry_input", f->stamp); });
+  glim::OdometryEstimationCallbacks::on_update_new_frame.add([&audit](const glim::EstimationFrame::ConstPtr& f) { audit.add("odometry_output", f->stamp); });
+  glim::OdometryEstimationCallbacks::on_marginalized_frames.add([&audit](const std::vector<glim::EstimationFrame::ConstPtr>& frames) {
+    for (const auto& f : frames) audit.add("marginalized_including_final_drain", f->stamp);
+  });
+  glim::SubMappingCallbacks::on_insert_frame.add([&audit](const glim::EstimationFrame::ConstPtr& f) { audit.add("submapping_input", f->stamp); });
+
   const std::string imu_topic = config_ros.param<std::string>("glim_ros", "imu_topic", "/imu");
   const std::string points_topic = config_ros.param<std::string>("glim_ros", "points_topic", "/points");
   const std::string image_topic = config_ros.param<std::string>("glim_ros", "image_topic", "/image");
-  std::vector<std::string> topics = {imu_topic, points_topic, image_topic};
+  std::vector<std::string> topics = {points_topic, image_topic};
+  if (enable_imu) topics.push_back(imu_topic);
 
   rosbag2_storage::StorageFilter filter;
   spdlog::info("topics:");
@@ -263,7 +316,10 @@ int main(int argc, char** argv) {
     reader_ = std::make_unique<rosbag2_cpp::readers::SequentialReader>();
     reader_->open(options, converter_options);
 
-    if (reader_->get_metadata().compression_format != "") {
+    // An explicitly supplied .mcap is already readable by the storage plugin.
+    // Parent-directory metadata may describe its compressed .mcap.zstd sibling;
+    // a compression reader would incorrectly require directory metadata here.
+    if (!is_mcap && reader_->get_metadata().compression_format != "") {
       spdlog::info("compression detected (format={})", reader_->get_metadata().compression_format);
       spdlog::info("opening bag with SequentialCompressionReader");
       reader_ = std::make_unique<rosbag2_compression::SequentialCompressionReader>();
@@ -350,12 +406,14 @@ int main(int argc, char** argv) {
       }
 
       if (msg->topic_name == imu_topic) {
+        if (!enable_imu) continue;
         if (topic_type != "sensor_msgs/msg/Imu") {
           spdlog::error("topic_type mismatch: {} != sensor_msgs/msg/Imu (topic={})", topic_type, msg->topic_name);
           return false;
         }
         auto imu_msg = std::make_shared<sensor_msgs::msg::Imu>();
         imu_serialization.deserialize_message(&serialized_msg, imu_msg.get());
+        audit.add("imu_callback", imu_msg->header.stamp.sec + imu_msg->header.stamp.nanosec * 1e-9);
         glim->imu_callback(imu_msg);
       } else if (msg->topic_name == points_topic) {
         if (topic_type != "sensor_msgs/msg/PointCloud2") {
@@ -364,6 +422,7 @@ int main(int argc, char** argv) {
         }
         auto points_msg = std::make_shared<sensor_msgs::msg::PointCloud2>();
         points_serialization.deserialize_message(&serialized_msg, points_msg.get());
+        audit.add("lidar_read", points_msg->header.stamp.sec + points_msg->header.stamp.nanosec * 1e-9);
         const size_t workload = glim->points_callback(points_msg);
 
         if (points_msg->header.stamp.sec + points_msg->header.stamp.nanosec * 1e-9 > end_time) {
@@ -446,6 +505,9 @@ int main(int argc, char** argv) {
   keyboard.cleanup();  // Explicitly restore terminal settings to avoid issues if the program is interrupted before exiting normally.
   glim->wait(auto_quit);
   glim->save(dump_path);
+  const auto audit_json = audit.json();
+  std::ofstream(dump_path + "/pipeline_audit.json") << audit_json << std::endl;
+  spdlog::info("pipeline audit: {}", audit_json);
   glim.reset();
 
   return 0;

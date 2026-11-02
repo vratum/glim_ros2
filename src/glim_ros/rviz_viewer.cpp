@@ -12,6 +12,7 @@
 #include <glim/util/logging.hpp>
 #include <glim/util/config.hpp>
 #include <glim/util/trajectory_manager.hpp>
+#include <glim/util/global_trajectory.hpp>
 #include <glim/util/ros_cloud_converter.hpp>
 
 namespace glim {
@@ -73,6 +74,7 @@ std::vector<GenericTopicSubscription::Ptr> RvizViewer::create_subscriptions(rclc
     false};
   rclcpp::QoS map_qos(rclcpp::QoSInitialization(map_qos_profile.history, map_qos_profile.depth), map_qos_profile);
   map_pub = node.create_publisher<sensor_msgs::msg::PointCloud2>("~/map", map_qos);
+  global_path_pub = node.create_publisher<nav_msgs::msg::Path>("~/global_path", map_qos);
 
   points_pub = node.create_publisher<sensor_msgs::msg::PointCloud2>("~/points", 10);
   points_corrected_pub = node.create_publisher<sensor_msgs::msg::PointCloud2>("~/points_corrected", 10);
@@ -607,6 +609,9 @@ void RvizViewer::odometry_new_frame(const EstimationFrame::ConstPtr& new_frame, 
 }
 
 void RvizViewer::globalmap_on_update_submaps(const std::vector<SubMap::Ptr>& submaps) {
+  if (submaps.empty()) {
+    return;
+  }
   const SubMap::ConstPtr latest_submap = submaps.back();
 
   const double stamp_endpoint_R = latest_submap->odom_frames.back()->stamp;
@@ -614,6 +619,31 @@ void RvizViewer::globalmap_on_update_submaps(const std::vector<SubMap::Ptr>& sub
   {
     std::lock_guard<std::mutex> lock(trajectory_mutex);
     trajectory->update_anchor(stamp_endpoint_R, T_world_endpoint_R);
+  }
+
+  // Replace the complete map-frame history after each graph update. Appending
+  // current odometry cannot apply a loop correction to the old route.
+  nav_msgs::msg::Path path;
+  path.header.frame_id = map_frame_id;
+  for (const auto& submap : submaps) {
+    visit_global_trajectory(*submap, [&](double stamp, const auto&, const Eigen::Isometry3d& T_world_lidar) {
+      geometry_msgs::msg::PoseStamped pose;
+      pose.header.frame_id = map_frame_id;
+      pose.header.stamp = rclcpp::Time(static_cast<int64_t>(stamp * 1e9));
+      pose.pose.position.x = T_world_lidar.translation().x();
+      pose.pose.position.y = T_world_lidar.translation().y();
+      pose.pose.position.z = T_world_lidar.translation().z();
+      const Eigen::Quaterniond q(T_world_lidar.linear());
+      pose.pose.orientation.x = q.x();
+      pose.pose.orientation.y = q.y();
+      pose.pose.orientation.z = q.z();
+      pose.pose.orientation.w = q.w();
+      path.poses.push_back(pose);
+    });
+  }
+  if (!path.poses.empty()) {
+    path.header.stamp = path.poses.back().header.stamp;
+    global_path_pub->publish(path);
   }
 
   std::vector<Eigen::Isometry3d, Eigen::aligned_allocator<Eigen::Isometry3d>> submap_poses(submaps.size());

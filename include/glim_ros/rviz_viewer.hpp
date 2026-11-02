@@ -11,6 +11,7 @@
 #include <tf2_ros/transform_broadcaster.h>
 
 #include <nav_msgs/msg/odometry.hpp>
+#include <nav_msgs/msg/path.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <geometry_msgs/msg/pose_with_covariance_stamped.hpp>
 #include <geometry_msgs/msg/twist_stamped.hpp>
@@ -67,6 +68,7 @@ private:
   double tf_time_offset;
 
   std::shared_ptr<rclcpp::Publisher<sensor_msgs::msg::PointCloud2>> map_pub;
+  std::shared_ptr<rclcpp::Publisher<nav_msgs::msg::Path>> global_path_pub;
 
   std::shared_ptr<rclcpp::Publisher<sensor_msgs::msg::PointCloud2>> points_pub;
   std::shared_ptr<rclcpp::Publisher<sensor_msgs::msg::PointCloud2>> points_corrected_pub;

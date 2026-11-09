@@ -313,12 +313,29 @@ size_t GlimROS::points_callback(const sensor_msgs::msg::PointCloud2::ConstShared
     return 0;
   }
 
+  // The preprocessor already diagnoses clouds below 100 points as too small.
+  // A Livox transport fragment can contain just one 96-point packet. Treating
+  // it as a scan poisons registration and creates a near-zero-dt IMU fallback
+  // when the following complete cloud arrives. Reject it before TimeKeeper
+  // or any estimator state is advanced; keep every IMU sample.
+  constexpr size_t minimum_scan_points = 100;
+  if (raw_points->size() < minimum_scan_points) {
+    spdlog::warn("reject incomplete LiDAR cloud: raw_points={} minimum={} stamp={:.9f}",
+                 raw_points->size(), minimum_scan_points, raw_points->stamp);
+    return 0;
+  }
+
   raw_points->stamp += points_time_offset;
   if (!time_keeper->process(raw_points)) {
     spdlog::warn("skip an invalid point cloud (stamp={})", raw_points->stamp);
     return 0;
   }
   auto preprocessed = preprocessor->preprocess(raw_points);
+  if (preprocessed->size() < minimum_scan_points) {
+    spdlog::warn("reject unusable LiDAR cloud: filtered_points={} minimum={} stamp={:.9f}",
+                 preprocessed->size(), minimum_scan_points, preprocessed->stamp);
+    return 0;
+  }
 
   if (keep_raw_points) {
     // note: Raw points are used only in extension modules for visualization purposes.

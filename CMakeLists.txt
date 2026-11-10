@@ -107,4 +107,7 @@ if(BUILD_WITH_VIEWER)
   )
 endif()
 
+include(CTest)
+add_subdirectory(extensions/barometer)
+
 ament_auto_package()

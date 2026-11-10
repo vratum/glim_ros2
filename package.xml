@@ -6,6 +6,7 @@
   <description>LiDAR-IMU odometry based on tight coupling of geometric and inertial constraints</description>
   <maintainer email="k.koide@aist.go.jp">k.koide</maintainer>
   <license>MIT</license>
+  <license>BSD-2-Clause</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
 
@@ -20,6 +21,7 @@
   <depend>image_transport</depend>
   <depend>nav_msgs</depend>
   <depend>sensor_msgs</depend>
+  <depend>std_msgs</depend>
   <depend>geometry_msgs</depend>
   <depend>tf2_ros</depend>
 

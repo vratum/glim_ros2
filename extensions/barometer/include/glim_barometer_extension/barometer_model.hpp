@@ -26,6 +26,10 @@ struct RelativeHeightMeasurement
 class BarometerModel
 {
 public:
+  static bool timely(const PressureSample& sample,double pose_stamp) {
+    const double age=pose_stamp-sample.stamp_sec;
+    return std::isfinite(age) && age>=0 && age<=2.5;
+  }
   static constexpr double kStandardAtmosphereHeightScaleM = 44330.0;
   static constexpr double kPressureExponent = 0.1903;
 

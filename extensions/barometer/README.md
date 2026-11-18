@@ -1,7 +1,7 @@
 # GLIM barometer extension
 
 This production GLIM extension consumes `sensor_msgs/msg/FluidPressure` and
-inserts a robust world-height factor for each active fixed-lag `Pose3` state.
+inserts a robust world-height factor when a fresh pressure observation arrives.
 It is deliberately a relative constraint: pressure is not treated as a precise
 geodetic altitude.
 
@@ -23,6 +23,9 @@ published `FluidPressure` message with the ROS reception time. A zero message
 stamp is also treated as reception time by this extension. This makes the
 factor receive-time aligned only; delayed USB transport is therefore a known
 measurement-timing error and must be monitored before use on fast motion.
+Observations older than 2.5 seconds are not applied to a pose. Both odometry
+and global height factors use a GTSAM Huber loss over the configured Gaussian
+uncertainty; this attenuates outliers without delaying changes in altitude.
 
 ## USB bridge
 
@@ -46,6 +49,16 @@ python3 scripts/barometer_bridge.py --ros-args \
 The bridge does not require `pyserial` and publishes `variance = 0.0` because
 the documentation supplies no measurement variance. The GLIM extension then
 uses its conservative fallback uncertainty.
+The published observation is not temporally smoothed. In particular, a median
+of three 0.5 Hz samples followed by a slow IIR must not be stamped as a current
+measurement: on a slope that can introduce metres of height error.
+
+For older recordings, `glim_ros/barometer_replay_metrics_path` in the session's
+JSON config can name the original `metrics/barometer.ndjson`. The extension
+replaces each recorded pressure value with its matching raw observation,
+retaining the bag message's timestamp. Unmatched observations fail explicitly;
+filtered and raw streams are never silently mixed. This is an optional replay
+input and does not read the USB device or create another bag.
 
 The lidar-lab Mapping and GLIM UI actions start this bridge automatically
 before GLIM and stop it when the mapping session ends.

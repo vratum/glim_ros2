@@ -1,5 +1,6 @@
 #include "glim_barometer_extension/barometer_model.hpp"
 #include "glim_barometer_extension/relative_height_factor.hpp"
+#include "glim_barometer_extension/pressure_replay.hpp"
 #include <gtsam/base/serialization.h>
 
 #include <glim/odometry/callbacks.hpp>
@@ -97,6 +98,11 @@ public:
     // selected the default (1.0) even when a session requested 0.0.
     const glim::Config config_ros(glim::GlobalConfig::get_config_path("config_ros"));
     influence_ = config_ros.param<double>("glim_ros", "barometer_influence", 1.0);
+    const auto replay_path=config_ros.param<std::string>("glim_ros","barometer_replay_metrics_path","");
+    if (!replay_path.empty()) {
+      pressure_replay_=std::make_unique<PressureReplay>(replay_path);
+      RCLCPP_INFO(node.get_logger(),"Using original pressure observations from %s",replay_path.c_str());
+    }
     queue_capacity_ = static_cast<std::size_t>(node.declare_parameter<int>(
       "barometer_queue_capacity", 512));
 
@@ -140,6 +146,7 @@ private:
     }
 
     PressureSample sample{stamp_sec, message->fluid_pressure, message->variance};
+    if (pressure_replay_) sample=pressure_replay_->at(stamp_sec);
     std::lock_guard<std::mutex> lock(mutex_);
     if (!session_reference_pressure_.has_value()) {
       session_reference_pressure_ = sample;
@@ -175,6 +182,7 @@ private:
       selected = pending_pressures_.front();
       pending_pressures_.pop_front();
     }
+    if (selected && !BarometerModel::timely(*selected,frame_stamp_sec)) return std::nullopt;
     return selected;
   }
 
@@ -187,7 +195,8 @@ private:
     if (found == pressure_history_.begin()) {
       return std::nullopt;
     }
-    return *std::prev(found);
+    const auto sample=*std::prev(found);
+    return BarometerModel::timely(sample,stamp_sec) ? std::optional<PressureSample>(sample) : std::nullopt;
   }
 
   std::optional<PressureSample> sessionReferencePressure()
@@ -245,10 +254,9 @@ private:
     if (influence_ == 0.0) {
       return;
     }
-    const double sigma_m = std::sqrt(measurement->variance_m2 / influence_);
-    const auto gaussian = gtsam::noiseModel::Isotropic::Sigma(1, sigma_m);
+    const auto noise = heightNoise(measurement->variance_m2,influence_);
     const double expected_world_z = anchor_->world_z + measurement->delta_height_m;
-    new_factors.emplace_shared<ReferenceHeightFactor>(current_key, expected_world_z, gaussian);
+    new_factors.emplace_shared<ReferenceHeightFactor>(current_key, expected_world_z, noise);
     pending_residual_ = PendingResidual{static_cast<std::uint64_t>(frame->id), expected_world_z};
     ++inserted_factor_count_;
   }
@@ -316,10 +324,9 @@ private:
         const auto measurement = BarometerModel::relativeHeight(
           global_anchor_->pressure, it->second.pressure, default_height_stddev_m_);
         if (measurement.has_value()) {
-          const double sigma_m = std::sqrt(measurement->variance_m2 / influence_);
-          const auto gaussian = gtsam::noiseModel::Isotropic::Sigma(1, sigma_m);
+          const auto noise = heightNoise(measurement->variance_m2,influence_);
           new_factors.emplace_shared<ReferenceHeightFactor>(
-            key, global_anchor_->world_z + measurement->delta_height_m, gaussian,it->second.vertical_axis);
+            key, global_anchor_->world_z + measurement->delta_height_m, noise,it->second.vertical_axis);
           ++inserted_global_factor_count_;
         }
       }
@@ -328,6 +335,7 @@ private:
   }
 
   rclcpp::Node * node_{nullptr};
+  std::unique_ptr<PressureReplay> pressure_replay_;
   std::string topic_{"/barometer/pressure"};
   rclcpp::Publisher<std_msgs::msg::Float64>::SharedPtr residual_publisher_;
   double default_height_stddev_m_{1.0};

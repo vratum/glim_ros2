@@ -1,5 +1,6 @@
 #include "glim_barometer_extension/barometer_model.hpp"
 #include "glim_barometer_extension/relative_height_factor.hpp"
+#include "glim_barometer_extension/pressure_replay.hpp"
 
 #include <gtsam/geometry/Pose3.h>
 #include <gtsam/linear/NoiseModel.h>
@@ -14,6 +15,7 @@
 #include <glim/util/serialization.hpp>
 #include <unistd.h>
 #include <cstdio>
+#include <fstream>
 
 namespace be = glim_barometer_extension;
 
@@ -38,6 +40,33 @@ int main()
   assert(climb && climb->delta_height_m > 10.0 && climb->delta_height_m < 12.0);
   // Two independent fallback one-metre samples produce two square metres.
   assert(std::abs(relative->variance_m2 - 2.0) < 1e-9);
+  assert(be::BarometerModel::timely(start,3.5));
+  assert(!be::BarometerModel::timely(start,3.501));
+  assert(!be::BarometerModel::timely(start,.99));
+  assert(!be::BarometerModel::timely(start,std::numeric_limits<double>::quiet_NaN()));
+  const auto robust=be::heightNoise(2.0,2.0);
+  const auto robust_model=std::dynamic_pointer_cast<gtsam::noiseModel::Robust>(robust);
+  assert(robust_model);
+  assert(std::abs(robust_model->robust()->weight(.5)-1)<1e-9);
+  assert(robust_model->robust()->weight(20)<.1);
+
+  const std::string metrics="/tmp/lidar_lab_pressure_replay_"+std::to_string(getpid())+".ndjson";
+  std::ofstream(metrics) << "{\"stamp_sec\":10,\"barometer_raw_pressure_pa\":100000}\n"
+                       << "{\"stamp_sec\":10,\"barometer_pressure_pa\":99900}\n"
+                       << "{\"stamp_sec\":12,\"barometer_raw_pressure_pa\":100100}\n";
+  const be::PressureReplay replay(metrics);
+  assert(replay.at(10.001).pressure_pa==100000);
+  assert(replay.at(11.999).pressure_pa==100100);
+  assert(replay.at(12.001).stamp_sec==12.001);
+  bool mismatch=false;
+  try { replay.at(11); } catch(const std::runtime_error&) { mismatch=true; }
+  assert(mismatch);
+  std::ofstream(metrics) << "{\"stamp_sec\":12,\"barometer_raw_pressure_pa\":100000}\n"
+                       << "{\"stamp_sec\":10,\"barometer_raw_pressure_pa\":100100}\n";
+  bool unordered=false;
+  try { const be::PressureReplay invalid(metrics); } catch(const std::invalid_argument&) { unordered=true; }
+  assert(unordered);
+  std::remove(metrics.c_str());
 
   // All later samples are measured against the session start, rather than
   // accumulating a chain of pressure-to-pressure deltas.
@@ -57,7 +86,7 @@ int main()
   assert(H_current.rows() == 1 && H_current.cols() == 6);
   assert(std::abs(H_current(0, 5) - 1.0) < 1e-9);
   gtsam::NonlinearFactorGraph graph;
-  graph.emplace_shared<be::ReferenceHeightFactor>(2,3.0,noise);
+  graph.emplace_shared<be::ReferenceHeightFactor>(2,3.0,robust);
   const std::string path="/tmp/lidar_lab_barometer_roundtrip_"+std::to_string(getpid())+".bin";
   glim::serializeToBinaryFile(graph,path,false);
   gtsam::NonlinearFactorGraph restored;
